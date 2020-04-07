@@ -35,5 +35,6 @@ class CycleGANDatasets(torch.utils.data.Dataset):
         img_B = self.transform(Image.open(self.dataset_B[idx]).convert('RGB'))
         return img_A, img_B
 
+
 if __name__ == "__main__":
     horse2zebra = CycleGANDatasets('./data/horse2zebra')

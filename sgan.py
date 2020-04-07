@@ -13,6 +13,13 @@ BATCH_SIZE = 32
 NUM_CLASSES = 10
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
+class Block(nn.Module):
+    def __init__(self):
+        super(Block, self).__init__()
+
+    def forward(self, x):
+        return 1.0 - (1.0 / (torch.sum(torch.exp(x)) + 1.0))
+
 class Generator(nn.Module):
 
     def __init__(self, z_dim):
@@ -40,6 +47,7 @@ class Generator(nn.Module):
         x = self.main(x)
         return x
 
+
 class Discriminator(nn.Module):
 
     def __init__(self):
@@ -64,13 +72,14 @@ class Discriminator(nn.Module):
             nn.Linear(3*3*128, NUM_CLASSES), # NEW!!
         )
         self.supervised_layer = nn.Softmax()
+        self.unsupervised_layer = Block()
 
-    def unsupervised_layer(self, x):
-        return 1.0 - (1.0 / (torch.sum(torch.exp(x)) + 1.0))
-
-    def forward(self, x):
+    def forward(self, x, is_labeled=True):
         y = self.main(x)
-        return self.supervised_layer(y), self.unsupervised_layer(y)
+        if is_labeled:
+            return self.supervised_layer(y)
+        else:
+            return self.unsupervised_layer(y)
 
 def load_mnist(path, batch_size, is_train=True):
     transform = transforms.Compose([
@@ -120,43 +129,40 @@ if __name__ == '__main__':
     train_unlabeled_dataloader = load_mnist('./data', BATCH_SIZE, is_train=True)
     test_dataloader = load_mnist('./data', BATCH_SIZE, is_train=False)
     # Labels
-    real = torch.ones(BATCH_SIZE, 1, device=device, dtype=dtype, requires_grad=False)
-    fake = torch.zeros(BATCH_SIZE, 1, device=device, dtype=dtype, requires_grad=False)
+    real = torch.tensor(1.0) # torch.ones(BATCH_SIZE, 1, device=device, dtype=dtype, requires_grad=False)
+    fake = torch.tensor(0.0) # torch.zeros(BATCH_SIZE, 1, device=device, dtype=dtype, requires_grad=False)
     # Loss
-    adv_loss = torch.nn.BCELoss()
-    aux_loss = torch.nn.CrossEntropyLoss()
+    adv_loss = nn.BCELoss()
+    aux_loss = nn.CrossEntropyLoss()
 
     print('Start Training!!')
     for epoch in range(EPOCHS):
         d_aux_losses = []
         d_adv_losses = []
         g_losses = []
-        for i, (labeled_imgs, labels) in enumerate(train_labeled_dataloader):
-            if i > 3:
+        i = 0
+        for (unlabeled_imgs, _), (labeled_imgs, labels) in zip(train_unlabeled_dataloader, train_labeled_dataloader):
+            if i > 4:
                 break
-            # DataLoader Unlabeled
-            idx = np.random.randint(0, NUM_CLASSES)
-            unlabeled_imgs, _ = train_unlabeled_dataloader[idx]
-            unlabeled_imgs.to(device)
-
+            i += 1
             # DataLoader Labeled
-            tensor_labels = torch.eye(NUM_CLASSES)[labels]
+            # tensor_labels = torch.eye(NUM_CLASSES)[labels].to(device)
+            labels.to(device)
             labeled_imgs.to(device)
-            if labeled_imgs.size()[0] != BATCH_SIZE or unlabeled_imgs.size()[0] != BATCH_SIZE:
-                break
+            unlabeled_imgs.to(device)
 
             # Generate Images
             z = torch.randn(BATCH_SIZE, Z_DIM, device=device, dtype=dtype)
             gen_imgs = G(z)
 
             # Discriminator
-            _, d_real_labels = D(labeled_imgs)
-            d_real, _ = D(unlabeled_imgs)
-            d_fake, _ = D(gen_imgs.detach())
+            d_labels = D(labeled_imgs, is_labeled=True)
+            d_real = D(unlabeled_imgs, is_labeled=False)
+            d_fake = D(gen_imgs.detach(), is_labeled=False)
 
             # Train Discriminator supervised
             optimizer_D.zero_grad()
-            d_aux_loss = aux_loss(d_real_labels, tensor_labels)
+            d_aux_loss = aux_loss(d_labels, labels)
             d_aux_loss.backward()
             optimizer_D.step()
             d_aux_losses.append(d_aux_loss.cpu().detach().numpy())
@@ -170,15 +176,16 @@ if __name__ == '__main__':
 
             # Train Generator
             optimizer_G.zero_grad()
-            g_valid, _ = D(gen_imgs)
-            g_loss = adv_loss(g_valid, real)
+            g_fake = D(gen_imgs, is_labeled=False)
+            g_loss = adv_loss(g_fake, real)
             g_loss.backward()
             optimizer_G.step()
             g_losses.append(g_loss.cpu().detach().numpy())
 
-        print(
-            "[Epoch %d/%d] [D loss: %f] [G loss: %f]"
-            % (epoch, EPOCHS, np.average(d_losses), np.average(g_losses))
-        )
-        np_gen_imgs = gen_imgs.cpu().detach().numpy[:16]
-        save_image(np_gen_imgs, "results/SGAN/SGAN_images_%d.png" % epoch, nrow=4, ncol=4)
+        if epoch % 100 == 0:
+            print(
+                    "[Epoch %d/%d] [D Aux loss: %f] [D Adv loss: %f] [G loss: %f]"
+                    % (epoch, EPOCHS, np.average(d_aux_losses), np.average(d_adv_losses), np.average(g_losses))
+            )
+            np_gen_imgs = 0.5 * gen_imgs.view(-1, 28, 28).cpu().detach().numpy()[:16] + 0.5
+            save_image(np_gen_imgs, "results/SGAN/SGAN_images_%d.png" % epoch, nrow=4, ncol=4)
